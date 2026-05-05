@@ -106,9 +106,7 @@ class DroidAgent(Workflow):
         """
         Configure default logging for DroidAgent if no real handler is present.
         """
-        has_real_handler = any(
-            not isinstance(h, logging.NullHandler) for h in logger.handlers
-        )
+        has_real_handler = any(not isinstance(h, logging.NullHandler) for h in logger.handlers)
         if not has_real_handler:
             handler = CLILogHandler()
             handler.setFormatter(
@@ -153,9 +151,7 @@ class DroidAgent(Workflow):
 
         # Load credential manager (supports both config and direct dict)
         credentials_source = (
-            credentials
-            if credentials is not None
-            else (config.credentials if config else None)
+            credentials if credentials is not None else (config.credentials if config else None)
         )
 
         if isinstance(credentials_source, CredentialManager):
@@ -198,9 +194,10 @@ class DroidAgent(Workflow):
         # Check if using external agent - skip LLM loading
         self._using_external_agent = self.config.agent.name != "droidrun"
 
-        self._stream_screenshots = os.environ.get(
-            "DROIDRUN_STREAM_SCREENSHOTS", ""
-        ).lower() in ("1", "true")
+        self._stream_screenshots = os.environ.get("DROIDRUN_STREAM_SCREENSHOTS", "").lower() in (
+            "1",
+            "true",
+        )
 
         self.timeout = timeout
 
@@ -221,9 +218,7 @@ class DroidAgent(Workflow):
 
                 logger.debug("🔄 Loading LLMs from config (llms not provided)...")
 
-                llms = load_agent_llms(
-                    config=self.config, output_model=output_model, **kwargs
-                )
+                llms = load_agent_llms(config=self.config, output_model=output_model, **kwargs)
             if isinstance(llms, dict):
                 llms = merge_llms_with_config(
                     self.config, llms, output_model=output_model, **kwargs
@@ -238,9 +233,7 @@ class DroidAgent(Workflow):
                 self.executor_llm = llms.get("executor")
                 self.fast_agent_llm = llms.get("fast_agent")
                 self.app_opener_llm = llms.get("app_opener")
-                self.structured_output_llm = llms.get(
-                    "structured_output", self.fast_agent_llm
-                )
+                self.structured_output_llm = llms.get("structured_output", self.fast_agent_llm)
             else:
                 self.manager_llm = llms
                 self.executor_llm = llms
@@ -255,10 +248,7 @@ class DroidAgent(Workflow):
             self.app_opener_llm = None
             self.structured_output_llm = None
 
-        if (
-            not self._using_external_agent
-            and self.config.logging.save_trajectory != "none"
-        ):
+        if not self._using_external_agent and self.config.logging.save_trajectory != "none":
             self.trajectory = Trajectory(
                 goal=self.shared_state.instruction,
                 base_path=self.config.logging.trajectory_path,
@@ -324,9 +314,7 @@ class DroidAgent(Workflow):
     async def start_handler(
         self, ctx: Context, ev: StartEvent
     ) -> FastAgentExecuteEvent | ManagerInputEvent:
-        logger.info(
-            f"🚀 Running DroidAgent to achieve goal: {self.shared_state.instruction}"
-        )
+        logger.info(f"🚀 Running DroidAgent to achieve goal: {self.shared_state.instruction}")
         ctx.write_event_to_stream(ev)
 
         if self.trajectory_writer:
@@ -403,14 +391,15 @@ class DroidAgent(Workflow):
                     raise ValueError("No connected Android devices found.")
                 device_serial = devices[0].serial
 
-            # Auto-setup portal if enabled
+            # No Portal setup needed - using ADB + OmniParser
+            # (auto_setup disabled by default)
             if self.config.device.auto_setup:
+                # Legacy: still support portal setup for backward compatibility
                 device_obj = await adb.device(serial=device_serial)
                 await ensure_portal_ready(device_obj, debug=self.config.logging.debug)
 
             driver = AndroidDriver(
                 serial=device_serial,
-                use_tcp=self.resolved_device_config.use_tcp,
             )
             await driver.connect()
 
@@ -444,6 +433,12 @@ class DroidAgent(Workflow):
                 tree_formatter=tree_formatter,
                 use_normalized=self.config.agent.use_normalized_coordinates,
                 stealth=stealth_enabled,
+                ui_parser_mode=self.config.ui_parser_mode,
+                omniparser_backend=self.config.omniparser_backend,
+                omniparser_api_key=self.config.omniparser_api_key,
+                omniparser_local_url=self.config.omniparser_local_url,
+                omniparser_box_threshold=self.config.omniparser_box_threshold,
+                omniparser_a11y_threshold=self.config.omniparser_a11y_threshold,
             )
 
         # ── 3. Build tool registry ────────────────────────────────────
@@ -510,21 +505,13 @@ class DroidAgent(Workflow):
             DroidAgentInitEvent(
                 goal=self.shared_state.instruction,
                 llms={
-                    "manager": (
-                        self.manager_llm.class_name() if self.manager_llm else "None"
-                    ),
-                    "executor": (
-                        self.executor_llm.class_name() if self.executor_llm else "None"
-                    ),
+                    "manager": (self.manager_llm.class_name() if self.manager_llm else "None"),
+                    "executor": (self.executor_llm.class_name() if self.executor_llm else "None"),
                     "fast_agent": (
-                        self.fast_agent_llm.class_name()
-                        if self.fast_agent_llm
-                        else "None"
+                        self.fast_agent_llm.class_name() if self.fast_agent_llm else "None"
                     ),
                     "app_opener": (
-                        self.app_opener_llm.class_name()
-                        if self.app_opener_llm
-                        else "None"
+                        self.app_opener_llm.class_name() if self.app_opener_llm else "None"
                     ),
                 },
                 tools=",".join(sorted(standard_tool_names)),
@@ -579,9 +566,7 @@ class DroidAgent(Workflow):
     # ========================================================================
 
     @step
-    async def execute_task(
-        self, ctx: Context, ev: FastAgentExecuteEvent
-    ) -> FastAgentResultEvent:
+    async def execute_task(self, ctx: Context, ev: FastAgentExecuteEvent) -> FastAgentResultEvent:
         """Execute a single task using FastAgent."""
 
         logger.debug(f"🔧 Executing task: {ev.instruction}")
@@ -670,9 +655,7 @@ class DroidAgent(Workflow):
             logger.warning(f"⚠️ Reached maximum steps ({self.config.agent.max_steps})")
             pending = self.shared_state.drain_user_messages()
             if pending:
-                logger.warning(
-                    f"⚠️ Dropping {len(pending)} external user message(s) at max steps"
-                )
+                logger.warning(f"⚠️ Dropping {len(pending)} external user message(s) at max steps")
                 ctx.write_event_to_stream(
                     ExternalUserMessageDroppedEvent(
                         message_ids=[m.id for m in pending],
@@ -686,9 +669,7 @@ class DroidAgent(Workflow):
             )
 
         self.shared_state.step_number += 1
-        logger.info(
-            f"🔄 Step {self.shared_state.step_number}/{self.config.agent.max_steps}"
-        )
+        logger.info(f"🔄 Step {self.shared_state.step_number}/{self.config.agent.max_steps}")
 
         try:
             handler = self.manager_agent.run()
@@ -733,9 +714,7 @@ class DroidAgent(Workflow):
         return ExecutorInputEvent(current_subgoal=ev.current_subgoal)
 
     @step
-    async def run_executor(
-        self, ctx: Context, ev: ExecutorInputEvent
-    ) -> ExecutorResultEvent:
+    async def run_executor(self, ctx: Context, ev: ExecutorInputEvent) -> ExecutorResultEvent:
         """Run Executor action phase."""
         logger.debug("⚡ Running Executor for action...")
 
@@ -852,11 +831,7 @@ class DroidAgent(Workflow):
             or self.config.agent.executor.vision
             or self.config.agent.fast_agent.vision
         )
-        if (
-            vision_any
-            or self._stream_screenshots
-            or self.config.logging.save_trajectory != "none"
-        ):
+        if vision_any or self._stream_screenshots or self.config.logging.save_trajectory != "none":
             try:
                 screenshot = await self.action_ctx.driver.screenshot()
                 if screenshot:
@@ -874,9 +849,7 @@ class DroidAgent(Workflow):
 
             try:
                 ui_state = await self.state_provider.get_state()
-                ctx.write_event_to_stream(
-                    RecordUIStateEvent(ui_state=ui_state.elements)
-                )
+                ctx.write_event_to_stream(RecordUIStateEvent(ui_state=ui_state.elements))
                 logger.debug("📋 Final UI state captured")
             except Exception as e:
                 logger.warning(f"Failed to capture final UI state: {e}")
@@ -887,9 +860,7 @@ class DroidAgent(Workflow):
             if isinstance(self.driver, RecordingDriver):
                 self.trajectory.macro = list(self.driver.log)
 
-            self.trajectory_writer.write_final(
-                self.trajectory, self.config.logging.trajectory_gifs
-            )
+            self.trajectory_writer.write_final(self.trajectory, self.config.logging.trajectory_gifs)
             await self.trajectory_writer.stop()
             logger.info(f"📁 Trajectory saved: {self.trajectory.trajectory_folder}")
 

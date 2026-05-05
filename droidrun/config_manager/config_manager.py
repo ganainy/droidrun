@@ -104,8 +104,8 @@ class DeviceConfig:
 
     serial: Optional[str] = None
     use_tcp: bool = False
-    platform: str = "android"  # "android" or "ios"
-    auto_setup: bool = True  # auto-install/fix portal before each run
+    platform: str = "android"
+    auto_setup: bool = False  # No Portal needed - using ADB + OmniParser
 
 
 @dataclass
@@ -153,6 +153,18 @@ class ToolsConfig:
     disabled_tools: List[str] = field(default_factory=_default_disabled_tools)
     stealth: bool = False
 
+    # OmniParser settings
+    # UI parser mode: "boost" (default), "omniparser", or "accessibility"
+    # - "boost": Use a11y with OmniParser fallback when sparse
+    # - "omniparser": Always use OmniParser (no a11y)
+    # - "accessibility": Always use a11y tree only (no fallback)
+    ui_parser_mode: str = "omniparser"
+    omniparser_backend: str = "replicate"  # "replicate" or "local"
+    omniparser_api_key: str = ""  # API key for Replicate
+    omniparser_local_url: str = "http://localhost:8000"
+    omniparser_box_threshold: float = 0.05
+    omniparser_a11y_threshold: int = 5  # Minimum a11y elements before triggering fallback
+
 
 @dataclass
 class CredentialsConfig:
@@ -176,6 +188,13 @@ class DroidConfig:
     credentials: CredentialsConfig = field(default_factory=CredentialsConfig)
     external_agents: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     mcp: MCPConfig = field(default_factory=MCPConfig)
+    # OmniParser settings
+    ui_parser_mode: str = "omniparser"
+    omniparser_backend: str = "replicate"
+    omniparser_api_key: str = ""
+    omniparser_local_url: str = "http://localhost:8000"
+    omniparser_box_threshold: float = 0.05
+    omniparser_a11y_threshold: int = 5
 
     def __post_init__(self):
         """Ensure default profiles exist."""
@@ -244,19 +263,13 @@ class DroidConfig:
         )
 
         manager_data = agent_data.get("manager", {})
-        manager_config = (
-            ManagerConfig(**manager_data) if manager_data else ManagerConfig()
-        )
+        manager_config = ManagerConfig(**manager_data) if manager_data else ManagerConfig()
 
         executor_data = agent_data.get("executor", {})
-        executor_config = (
-            ExecutorConfig(**executor_data) if executor_data else ExecutorConfig()
-        )
+        executor_config = ExecutorConfig(**executor_data) if executor_data else ExecutorConfig()
 
         app_cards_data = agent_data.get("app_cards", {})
-        app_cards_config = (
-            AppCardConfig(**app_cards_data) if app_cards_data else AppCardConfig()
-        )
+        app_cards_config = AppCardConfig(**app_cards_data) if app_cards_data else AppCardConfig()
 
         agent_config = AgentConfig(
             name=agent_data.get("name", "droidrun"),
@@ -265,9 +278,7 @@ class DroidConfig:
             streaming=agent_data.get("streaming", False),
             after_sleep_action=agent_data.get("after_sleep_action", 1.0),
             wait_for_stable_ui=agent_data.get("wait_for_stable_ui", 0.3),
-            use_normalized_coordinates=agent_data.get(
-                "use_normalized_coordinates", False
-            ),
+            use_normalized_coordinates=agent_data.get("use_normalized_coordinates", False),
             fast_agent=fast_agent_config,
             manager=manager_config,
             executor=executor_config,
@@ -307,6 +318,12 @@ class DroidConfig:
             credentials=CredentialsConfig(**data.get("credentials", {})),
             external_agents=external_agents,
             mcp=mcp_config,
+            ui_parser_mode=data.get("ui_parser_mode", "omniparser"),
+            omniparser_backend=data.get("omniparser_backend", "replicate"),
+            omniparser_api_key=data.get("omniparser_api_key", ""),
+            omniparser_local_url=data.get("omniparser_local_url", "http://localhost:8000"),
+            omniparser_box_threshold=data.get("omniparser_box_threshold", 0.05),
+            omniparser_a11y_threshold=data.get("omniparser_a11y_threshold", 5),
         )
 
     @classmethod

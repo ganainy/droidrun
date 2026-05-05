@@ -24,6 +24,8 @@ class UIState:
         screen_width: int,
         screen_height: int,
         use_normalized: bool = False,
+        omni_tree: Optional[List[Dict[str, Any]]] = None,
+        omni_source: Optional[str] = None,
     ) -> None:
         self.elements = elements
         self.formatted_text = formatted_text
@@ -32,6 +34,10 @@ class UIState:
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.use_normalized = use_normalized
+
+        # OmniParser integration
+        self.omni_tree = omni_tree  # Vision-based UI elements from OmniParser
+        self.omni_source = omni_source  # "a11y", "omni", or "merged"
 
     # -- element lookup ------------------------------------------------------
 
@@ -52,8 +58,7 @@ class UIState:
             if len(indices) > 20:
                 indices_str += f"... and {len(indices) - 20} more"
             raise ValueError(
-                f"No element found with index {index}. "
-                f"Available indices: {indices_str}"
+                f"No element found with index {index}. Available indices: {indices_str}"
             )
 
         bounds_str = element.get("bounds")
@@ -70,8 +75,7 @@ class UIState:
             left, top, right, bottom = map(int, bounds_str.split(","))
         except ValueError as e:
             raise ValueError(
-                f"Invalid bounds format for element with index {index}: "
-                f"{bounds_str}"
+                f"Invalid bounds format for element with index {index}: {bounds_str}"
             ) from e
 
         return (left + right) // 2, (top + bottom) // 2
@@ -123,9 +127,7 @@ class UIState:
 
         point = find_clear_point(target_bounds, blockers)
         if point is None:
-            raise ValueError(
-                f"Element {index} is fully obscured by overlapping elements"
-            )
+            raise ValueError(f"Element {index} is fully obscured by overlapping elements")
         return point
 
     def convert_point(self, x: int, y: int) -> Tuple[int, int]:
@@ -137,9 +139,7 @@ class UIState:
     # -- internal helpers ----------------------------------------------------
 
     @staticmethod
-    def _find_by_index(
-        elements: List[Dict[str, Any]], target: int
-    ) -> Optional[Dict[str, Any]]:
+    def _find_by_index(elements: List[Dict[str, Any]], target: int) -> Optional[Dict[str, Any]]:
         for item in elements:
             if item.get("index") == target:
                 return item

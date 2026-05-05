@@ -539,9 +539,29 @@ class PortalClient:
 
     async def _take_screenshot_adb(self) -> bytes:
         """Take screenshot via ADB screencap (fallback)."""
-        data = await self.device.screenshot_bytes()
-        logger.debug("Screenshot taken via ADB")
-        return data
+        retries = 3
+        delay_seconds = 1.0
+        last_error: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                data = await self.device.screenshot_bytes()
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                logger.debug("Screenshot taken via ADB")
+                return data
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "ADB screenshot failed on attempt %s/%s: %s",
+                    attempt,
+                    retries,
+                    e,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(delay_seconds)
+
+        raise RuntimeError("Screenshot capture failed after retries") from last_error
 
     async def get_apps(self, include_system: bool = True) -> List[Dict[str, str]]:
         """

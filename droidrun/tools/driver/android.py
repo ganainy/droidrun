@@ -1,7 +1,7 @@
-"""AndroidDriver — ADB-based device driver.
+"""AndroidDriver — ADB-based device driver without Portal.
 
-Wraps ``adbutils.Device`` + ``PortalClient`` to provide clean device I/O
-without event emission, formatting, or element lookup.
+Wraps ``adbutils.Device`` to provide clean device I/O without Portal.
+Uses ADB commands for all operations - no special app needed on device.
 """
 
 from __future__ import annotations
@@ -9,20 +9,18 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 from async_adbutils import adb
 
-from droidrun.tools.android.portal_client import PortalClient
 from droidrun.tools.driver.base import DeviceDriver
 
 logger = logging.getLogger("droidrun")
 
-PORTAL_DEFAULT_TCP_PORT = 8080
-
 
 class AndroidDriver(DeviceDriver):
-    """Raw Android device I/O via ADB + Portal."""
+    """Raw Android device I/O via ADB only - no Portal needed."""
 
     platform = "Android"
 
@@ -52,14 +50,9 @@ class AndroidDriver(DeviceDriver):
     def __init__(
         self,
         serial: str | None = None,
-        use_tcp: bool = False,
-        remote_tcp_port: int = PORTAL_DEFAULT_TCP_PORT,
     ) -> None:
         self._serial = serial
-        self._use_tcp = use_tcp
-        self._remote_tcp_port = remote_tcp_port
         self.device = None
-        self.portal: PortalClient | None = None
         self._connected = False
 
     # -- lifecycle -----------------------------------------------------------
@@ -73,13 +66,8 @@ class AndroidDriver(DeviceDriver):
         if state != "device":
             raise ConnectionError(f"Device is not online. State: {state}")
 
-        self.portal = PortalClient(self.device, prefer_tcp=self._use_tcp)
-        await self.portal.connect()
-
-        from droidrun.portal import setup_keyboard  # circular import guard
-
-        await setup_keyboard(self.device)
         self._connected = True
+        logger.info("Connected to Android device via ADB (no Portal)")
 
     async def ensure_connected(self) -> None:
         if not self._connected:
@@ -105,7 +93,22 @@ class AndroidDriver(DeviceDriver):
 
     async def input_text(self, text: str, clear: bool = False) -> bool:
         await self.ensure_connected()
-        return await self.portal.input_text(text, clear)
+
+        if clear:
+            # Clear existing text by selecting all and deleting
+            await self.device.shell("input keyevent KEYCODE_MOVE_END")
+            # Select all (might need multiple Ctrl+A)
+            await self.device.shell("input keyevent KEYCODE_CTRL_A")
+            await self.device.shell("input keyevent KEYCODE_DEL")
+
+        # Escape special characters for shell
+        # Replace " with \" and ' with '
+        escaped_text = text.replace('"', '\\"')
+
+        # Use ADB input text - this is more reliable than shell input
+        # For special characters, we use Unicode input method
+        await self.device.shell(f'input text "{escaped_text}"')
+        return True
 
     async def press_button(self, button: str) -> None:
         await self.ensure_connected()
@@ -170,8 +173,41 @@ class AndroidDriver(DeviceDriver):
         return result
 
     async def get_apps(self, include_system: bool = True) -> List[Dict[str, str]]:
+        """Get list of installed apps using pm command."""
         await self.ensure_connected()
-        return await self.portal.get_apps(include_system)
+
+        # Use pm list packages
+        filter_flag = "" if include_system else "-3"
+        output = await self.device.shell(f"pm list packages {filter_flag}")
+
+        packages = []
+        for line in output.splitlines():
+            line = line.strip()
+            if line.startswith("package:"):
+                package_name = line.replace("package:", "").strip()
+                # Get app label/info
+                label = await self._get_app_label(package_name)
+                packages.append(
+                    {
+                        "package": package_name,
+                        "label": label or package_name,
+                    }
+                )
+
+        return packages
+
+    async def _get_app_label(self, package: str) -> Optional[str]:
+        """Get app display label from package."""
+        try:
+            # Use dumpsys to get app info
+            output = await self.device.shell(f"dumpsys package {package}")
+            # Try to extract label from application info
+            match = re.search(r'application label="([^"]+)"', output)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return None
 
     async def list_packages(self, include_system: bool = False) -> List[str]:
         await self.ensure_connected()
@@ -181,12 +217,114 @@ class AndroidDriver(DeviceDriver):
     # -- state / observation -------------------------------------------------
 
     async def screenshot(self, hide_overlay: bool = True) -> bytes:
+        """Take screenshot using ADB screencap - no Portal needed."""
         await self.ensure_connected()
-        return await self.portal.take_screenshot(hide_overlay)
+
+        retries = 3
+        delay_seconds = 1.0
+        last_error: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                # Use async_adbutils built-in screenshot_bytes method
+                result = await self.device.screenshot_bytes()
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Screenshot capture failed on attempt %s/%s: %s",
+                    attempt,
+                    retries,
+                    e,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(delay_seconds)
+                continue
+
+            # Ensure bytes
+            if isinstance(result, str):
+                result = result.encode("utf-8")
+
+            # Check if result starts with PNG magic bytes and convert to JPEG if needed
+            if result[:8] == b"\x89PNG\r\n\x1a\n":
+                # It's PNG, validate and convert to JPEG using Pillow
+                try:
+                    import io
+                    from PIL import Image
+
+                    with Image.open(io.BytesIO(result)) as img:
+                        img.verify()
+
+                    with Image.open(io.BytesIO(result)) as img:
+                        if img.mode != "RGB":
+                            img = img.convert("RGB")
+                        output = io.BytesIO()
+                        img.save(output, format="JPEG", quality=95)
+                        return output.getvalue()
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        "Invalid PNG screenshot on attempt %s/%s: %s",
+                        attempt,
+                        retries,
+                        e,
+                    )
+            else:
+                return result
+
+            if attempt < retries:
+                await asyncio.sleep(delay_seconds)
+
+        if last_error is not None:
+            raise RuntimeError("Screenshot capture failed after retries") from last_error
+
+        raise RuntimeError("Screenshot capture failed after retries")
+
+        return result
+        return result
 
     async def get_ui_tree(self) -> Dict[str, Any]:
+        """Get UI state - returns structure expected by provider.
+
+        With OmniParser mode, this returns an empty a11y tree since we're
+        not using Portal. The provider will use screenshot + OmniParser instead.
+        """
         await self.ensure_connected()
-        return await self.portal.get_state()
+        # Return minimal state - actual UI parsing done by OmniParser
+        return {
+            "a11y_tree": [],  # Empty - using OmniParser instead
+            "phone_state": {
+                "currentApp": await self._get_current_app(),
+            },
+            "device_context": await self._get_device_context(),
+        }
+
+    async def _get_current_app(self) -> str:
+        """Get currently focused app package."""
+        try:
+            output = await self.device.shell("dumpsys window | grep mCurrentFocus")
+            match = re.search(r"([a-zA-Z0-9_.]+)/([a-zA-Z0-9_.]+)", output)
+            if match:
+                return match.group(1)
+        except Exception:
+            pass
+        return ""
+
+    async def _get_device_context(self) -> Dict[str, Any]:
+        """Get device context (screen size, etc)."""
+        try:
+            output = await self.device.shell("wm size")
+            match = re.search(r"(\d+)x(\d+)", output)
+            if match:
+                width, height = int(match.group(1)), int(match.group(2))
+                return {
+                    "screen_bounds": {
+                        "width": width,
+                        "height": height,
+                    }
+                }
+        except Exception:
+            pass
+        return {"screen_bounds": {"width": 1080, "height": 1920}}
 
     async def get_date(self) -> str:
         await self.ensure_connected()

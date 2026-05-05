@@ -94,9 +94,7 @@ async def fetch_state_with_retry(
 
             err_desc = str(e) or type(e).__name__
             suffix = f" (retrying in {delay:.0f}s)" if not is_last else ""
-            logger.warning(
-                f"get_state attempt {attempt + 1} failed: {err_desc}{suffix}"
-            )
+            logger.warning(f"get_state attempt {attempt + 1} failed: {err_desc}{suffix}")
 
             # Mid-retry recovery: restart the a11y service once
             if (
@@ -152,6 +150,12 @@ class AndroidStateProvider(StateProvider):
         use_normalized: bool = False,
         stealth: bool = False,
         ui_cls: "type[UIState] | None" = None,
+        ui_parser_mode: str = "boost",  # "boost", "omniparser", or "accessibility"
+        omniparser_backend: str = "replicate",
+        omniparser_api_key: Optional[str] = None,
+        omniparser_local_url: str = "http://localhost:8000",
+        omniparser_box_threshold: float = 0.05,
+        omniparser_a11y_threshold: int = 5,
     ) -> None:
         super().__init__(driver)
         self.tree_filter = tree_filter
@@ -159,68 +163,81 @@ class AndroidStateProvider(StateProvider):
         self.use_normalized = use_normalized
         self._ui_cls = ui_cls or (StealthUIState if stealth else UIState)
 
-    async def _recover_portal(self) -> None:
-        """Restart Portal's accessibility service and TCP socket server."""
-        from droidrun.tools.driver.android import AndroidDriver
+        # UI parser mode: "boost" (default), "omniparser", or "accessibility"
+        self.ui_parser_mode = ui_parser_mode
+        self.omniparser_backend = omniparser_backend
+        self.omniparser_api_key = omniparser_api_key
+        self.omniparser_local_url = omniparser_local_url
+        self.omniparser_box_threshold = omniparser_box_threshold
+        self.omniparser_a11y_threshold = omniparser_a11y_threshold
 
-        if not isinstance(self.driver, AndroidDriver):
-            return
-        device = self.driver.device
-        if device is None:
-            return
-
-        from droidrun.portal import A11Y_SERVICE_NAME
-
-        # 1. Restart accessibility service
-        logger.debug("Restarting Portal accessibility service...")
-        await device.shell("settings put secure accessibility_enabled 0")
-        await asyncio.sleep(0.5)
-        await device.shell(
-            f"settings put secure enabled_accessibility_services {A11Y_SERVICE_NAME}"
-        )
-        await device.shell("settings put secure accessibility_enabled 1")
-
-        # 2. Restart TCP socket server if it was in use
-        portal = self.driver.portal
-        if portal is not None and portal.tcp_available:
-            logger.debug("Restarting Portal TCP socket server...")
-            try:
-                await device.shell(
-                    "content insert --uri content://com.droidrun.portal/toggle_socket_server --bind enabled:b:false"
-                )
-                await asyncio.sleep(0.3)
-                await device.shell(
-                    "content insert --uri content://com.droidrun.portal/toggle_socket_server --bind enabled:b:true"
-                )
-                # Re-fetch auth token — server restart may rotate it
-                new_token = await portal._fetch_auth_token()
-                if new_token:
-                    portal._auth_token = new_token
-                    logger.debug("Auth token refreshed after TCP server restart")
-            except Exception as e:
-                logger.debug(f"TCP server restart failed: {e}")
-
-        await asyncio.sleep(1.5)
+        # OmniParser client (initialized lazily)
+        self._omni_client = None
+        self._omni_initialized = False
 
     async def get_state(self) -> UIState:
-        combined_data = await fetch_state_with_retry(
-            fetch=self.driver.get_ui_tree,
-            recovery=self._recover_portal,
-        )
+        # Get screenshot via driver (ADB, no Portal needed)
+        screenshot_bytes = await self._capture_screenshot_with_retry()
 
-        device_context = combined_data["device_context"]
-        screen_bounds = device_context.get("screen_bounds", {})
-        screen_width = screen_bounds.get("width")
-        screen_height = screen_bounds.get("height")
+        # Get device context
+        device_context = {}
+        screen_width = 1080
+        screen_height = 1920
 
-        filtered = self.tree_filter.filter(combined_data["a11y_tree"], device_context)
+        try:
+            ui_tree = await self.driver.get_ui_tree()
+            device_context = ui_tree.get("device_context", {})
+            screen_bounds = device_context.get("screen_bounds", {})
+            screen_width = screen_bounds.get("width", 1080)
+            screen_height = screen_bounds.get("height", 1920)
+            phone_state = ui_tree.get("phone_state", {})
+            a11y_tree = ui_tree.get("a11y_tree", [])
+        except Exception as e:
+            logger.warning(f"get_ui_tree failed: {e}")
+            phone_state = {}
+            a11y_tree = []
+
+        # Determine UI parser mode and get elements
+        omni_tree = None
+        omni_source = "a11y"
+
+        if self.ui_parser_mode == "accessibility":
+            # Use a11y tree only
+            filtered = self.tree_filter.filter(a11y_tree, device_context) if a11y_tree else None
+            logger.debug(f"Using accessibility tree ({len(a11y_tree)} elements)")
+
+        elif self.ui_parser_mode == "omniparser":
+            # Mode 2: Always use OmniParser (ignore a11y, no fallback)
+            omni_tree = await self._get_omni_parser_elements(screenshot_bytes)
+            if omni_tree:
+                omni_source = "omni"
+                logger.info(f"Using OmniParser only ({len(omni_tree)} elements)")
+            filtered = None  # Will use omni_tree in formatter
+            # No fallback - if OmniParser fails, let it propagate
+
+        else:  # "boost" mode
+            # Use a11y if available, otherwise OmniParser
+            if a11y_tree and len(a11y_tree) >= self.omniparser_a11y_threshold:
+                filtered = self.tree_filter.filter(a11y_tree, device_context)
+            else:
+                # A11y sparse - try OmniParser
+                try:
+                    omni_tree = await self._get_omni_parser_elements(screenshot_bytes)
+                    if omni_tree:
+                        omni_source = "omni"
+                        logger.info(f"Using OmniParser boost ({len(omni_tree)} elements)")
+                    filtered = None
+                except Exception as e:
+                    logger.warning(f"OmniParser boost failed: {e}")
+                    filtered = a11y_tree
+                    omni_tree = None
 
         self.tree_formatter.screen_width = screen_width
         self.tree_formatter.screen_height = screen_height
         self.tree_formatter.use_normalized = self.use_normalized
 
-        formatted_text, focused_text, elements, phone_state = (
-            self.tree_formatter.format(filtered, combined_data["phone_state"])
+        formatted_text, focused_text, elements, phone_state = self.tree_formatter.format(
+            filtered, phone_state, omni_tree=omni_tree
         )
 
         return self._ui_cls(
@@ -231,4 +248,136 @@ class AndroidStateProvider(StateProvider):
             screen_width=screen_width,
             screen_height=screen_height,
             use_normalized=self.use_normalized,
+            omni_tree=omni_tree,
+            omni_source=omni_source,
         )
+
+    async def _capture_screenshot_with_retry(self) -> bytes:
+        retries = 3
+        delay_seconds = 1.5
+        last_error: Exception | None = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                return await self.driver.screenshot()
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "UI screenshot capture failed on attempt %s/%s: %s",
+                    attempt,
+                    retries,
+                    e,
+                )
+                if attempt < retries:
+                    await asyncio.sleep(delay_seconds)
+
+        raise RuntimeError("Failed to capture UI screenshot after retries") from last_error
+
+        device_context = combined_data["device_context"]
+        screen_bounds = device_context.get("screen_bounds", {})
+        screen_width = screen_bounds.get("width")
+        screen_height = screen_bounds.get("height")
+
+        a11y_tree = combined_data["a11y_tree"]
+        phone_state = combined_data["phone_state"]
+
+        # Determine UI parser mode and get elements
+        omni_tree = None
+        omni_source = "a11y"
+
+        if self.ui_parser_mode == "accessibility":
+            # Mode 3: Always use accessibility tree only
+            filtered = self.tree_filter.filter(a11y_tree, device_context) if a11y_tree else None
+            logger.debug(f"Using accessibility tree ({len(a11y_tree)} elements)")
+
+        elif self.ui_parser_mode == "omniparser":
+            # Mode 2: Always use OmniParser (ignore a11y, no fallback)
+            omni_tree = await self._get_omni_parser_elements()
+            if omni_tree:
+                omni_source = "omni"
+                logger.info(f"Using OmniParser only ({len(omni_tree)} elements)")
+            filtered = None  # Will use omni_tree in formatter
+            # No fallback - if OmniParser fails, let it propagate
+
+        else:  # "boost" (default)
+            # Mode 1: Use a11y with OmniParser fallback when sparse
+            if a11y_tree and len(a11y_tree) < self.omniparser_a11y_threshold:
+                # A11y tree is sparse - try OmniParser
+                try:
+                    omni_tree = await self._get_omni_parser_elements()
+                    if omni_tree:
+                        omni_source = "omni"
+                        logger.info(f"Using OmniParser boost ({len(omni_tree)} elements)")
+                except Exception as e:
+                    logger.warning(f"OmniParser boost failed: {e}")
+                    omni_tree = None
+
+            # Use a11y if we have enough elements, or if omni failed
+            if omni_tree is None:
+                filtered = self.tree_filter.filter(a11y_tree, device_context) if a11y_tree else None
+            else:
+                filtered = None  # Will use omni_tree in formatter
+
+        self.tree_formatter.screen_width = screen_width
+        self.tree_formatter.screen_height = screen_height
+        self.tree_formatter.use_normalized = self.use_normalized
+
+        formatted_text, focused_text, elements, phone_state = self.tree_formatter.format(
+            filtered, phone_state, omni_tree=omni_tree
+        )
+
+        return self._ui_cls(
+            elements=elements,
+            formatted_text=formatted_text,
+            focused_text=focused_text,
+            phone_state=phone_state,
+            screen_width=screen_width,
+            screen_height=screen_height,
+            use_normalized=self.use_normalized,
+            omni_tree=omni_tree,
+            omni_source=omni_source,
+        )
+
+    async def _get_omni_parser_elements(
+        self, screenshot_bytes: bytes = None
+    ) -> List[Dict[str, Any]]:
+        """Get UI elements using OmniParser vision model."""
+        if not self._omni_initialized:
+            self._init_omni_parser()
+            self._omni_initialized = True
+
+        if not self._omni_client:
+            return []
+
+        # Use provided screenshot or take new one
+        if screenshot_bytes is None:
+            screenshot_bytes = await self.driver.screenshot()
+
+        # Parse with OmniParser
+        return self._omni_client.parse(screenshot_bytes)
+
+    def _init_omni_parser(self) -> None:
+        """Initialize OmniParser client."""
+        import os
+
+        try:
+            from droidrun.tools.omniparser_client import create_omni_parser_client
+
+            # Use provided API key, or fall back to environment variable
+            api_key = self.omniparser_api_key or os.environ.get("REPLICATE_API_KEY", "")
+
+            logger.debug(
+                f"Initializing OmniParser: backend={self.omniparser_backend}, "
+                f"omniparser_api_key={bool(self.omniparser_api_key)}, "
+                f"env_REPLICATE_API_KEY={bool(os.environ.get('REPLICATE_API_KEY'))}, "
+                f"final_api_key={bool(api_key)}"
+            )
+            self._omni_client = create_omni_parser_client(
+                backend=self.omniparser_backend,
+                api_key=api_key,
+                local_url=self.omniparser_local_url,
+                box_threshold=self.omniparser_box_threshold,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to initialize OmniParser: {e}")
+            self._omni_client = None

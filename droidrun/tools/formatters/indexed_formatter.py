@@ -1,8 +1,11 @@
 """Indexed formatter - Standard Droidrun format."""
 
+import logging
 from typing import Dict, Any, List, Optional, Tuple
 from .base import TreeFormatter
 from ..helpers.coordinate import bounds_to_normalized
+
+logger = logging.getLogger("droidrun")
 
 
 class IndexedFormatter(TreeFormatter):
@@ -14,9 +17,18 @@ class IndexedFormatter(TreeFormatter):
         self.use_normalized: bool = False
 
     def format(
-        self, filtered_tree: Optional[Dict[str, Any]], phone_state: Dict[str, Any]
+        self,
+        filtered_tree: Optional[Dict[str, Any]],
+        phone_state: Dict[str, Any],
+        omni_tree: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[str, str, List[Dict[str, Any]], Dict[str, Any]]:
-        """Format device state with indices and hierarchy."""
+        """Format device state with indices and hierarchy.
+
+        Args:
+            filtered_tree: Filtered accessibility tree
+            phone_state: Current phone state
+            omni_tree: Optional OmniParser elements (used when a11y is sparse)
+        """
         focused_text = self._get_focused_text(phone_state)
 
         if filtered_tree is None:
@@ -24,12 +36,84 @@ class IndexedFormatter(TreeFormatter):
         else:
             a11y_tree = self._flatten_with_index(filtered_tree, [1])
 
+        # Handle OmniParser fallback
+        use_omni_fallback = False
+        logger.debug(
+            f"IndexedFormatter.format: omni_tree={type(omni_tree)}, a11y_tree={type(a11y_tree)}, len(a11y_tree)={len(a11y_tree) if a11y_tree else 0}"
+        )
+
+        if omni_tree and len(a11y_tree) < 5:
+            # A11y is sparse, use OmniParser elements instead
+            logger.debug(f"Converting omni_tree ({len(omni_tree)} elements) to indexed format")
+            a11y_tree = self._convert_omni_to_indexed(omni_tree)
+            use_omni_fallback = True
+
         phone_state_text = self._format_phone_state(phone_state)
         ui_elements_text = self._format_ui_elements_text(a11y_tree)
+
+        # Add note if using OmniParser fallback
+        if use_omni_fallback:
+            phone_state_text += "\n\n⚠️ **Using OmniParser fallback (a11y tree incomplete)**"
 
         formatted_text = f"{phone_state_text}\n\n{ui_elements_text}"
 
         return (formatted_text, focused_text, a11y_tree, phone_state)
+
+    def _convert_omni_to_indexed(self, omni_tree: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert OmniParser elements to indexed format matching a11y tree.
+
+        Args:
+            omni_tree: List of OmniParser elements
+
+        Returns:
+            List of elements in same format as a11y tree
+        """
+        logger.debug(
+            f"_convert_omni_to_indexed: input type={type(omni_tree)}, len={len(omni_tree) if omni_tree else 0}"
+        )
+
+        if not omni_tree:
+            return []
+
+        # Handle non-list or non-dict elements
+        if not isinstance(omni_tree, list):
+            logger.warning(f"omni_tree is not a list, type: {type(omni_tree)}")
+            return []
+
+        indexed = []
+        for i, el in enumerate(omni_tree):
+            # Skip non-dict elements
+            if not isinstance(el, dict):
+                logger.warning(f"Skipping non-dict element at index {i}: {type(el)}")
+                continue
+
+            # Convert bbox from [x1, y1, x2, y2] ratios to bounds string
+            bbox = el.get("bbox", [])
+            if bbox and len(bbox) == 4:
+                # Convert normalized coords to pixel coords if we have screen dimensions
+                if self.screen_width and self.screen_height:
+                    x1 = int(bbox[0] * self.screen_width)
+                    y1 = int(bbox[1] * self.screen_height)
+                    x2 = int(bbox[2] * self.screen_width)
+                    y2 = int(bbox[3] * self.screen_height)
+                    bounds = f"{x1},{y1},{x2},{y2}"
+                else:
+                    bounds = f"{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
+            else:
+                bounds = None
+
+            indexed.append(
+                {
+                    "index": i + 1,
+                    "text": el.get("content", ""),
+                    "type": el.get("type", "unknown"),
+                    "bounds": bounds,
+                    "clickable": el.get("interactivity", False),
+                    "className": "omni_element",
+                    "source": "omni",
+                }
+            )
+        return indexed
 
     @staticmethod
     def _get_focused_text(phone_state: Dict[str, Any]) -> str:
@@ -72,7 +156,9 @@ class IndexedFormatter(TreeFormatter):
             phone_state_text = "\n".join(lines)
         else:
             if isinstance(phone_state, dict) and "error" in phone_state:
-                phone_state_text = f"📱 **Phone State Error:** {phone_state.get('message', 'Unknown error')}"
+                phone_state_text = (
+                    f"📱 **Phone State Error:** {phone_state.get('message', 'Unknown error')}"
+                )
             else:
                 phone_state_text = f"📱 **Phone State:** {phone_state}"
 
@@ -81,16 +167,16 @@ class IndexedFormatter(TreeFormatter):
     def _format_ui_elements_text(self, a11y_tree: List[Dict[str, Any]]) -> str:
         """Format UI elements text."""
         coord_note = " (normalized [0-1000])" if self.use_normalized else ""
-        schema = (
-            "'index. className: resourceId; checkedState, text - bounds(x1,y1,x2,y2)'"
-        )
+        schema = "'index. className: resourceId; checkedState, text - bounds(x1,y1,x2,y2)'"
         if a11y_tree:
             formatted_ui = IndexedFormatter._format_ui_elements(a11y_tree)
             ui_elements_text = (
                 f"Current Clickable UI elements{coord_note}:\n{schema}:\n{formatted_ui}"
             )
         else:
-            ui_elements_text = f"Current Clickable UI elements{coord_note}:\n{schema}:\nNo UI elements found"
+            ui_elements_text = (
+                f"Current Clickable UI elements{coord_note}:\n{schema}:\nNo UI elements found"
+            )
         return ui_elements_text
 
     @staticmethod
@@ -141,17 +227,13 @@ class IndexedFormatter(TreeFormatter):
             formatted_lines.append(formatted_line)
 
             if children:
-                child_formatted = IndexedFormatter._format_ui_elements(
-                    children, level + 1
-                )
+                child_formatted = IndexedFormatter._format_ui_elements(children, level + 1)
                 if child_formatted:
                     formatted_lines.append(child_formatted)
 
         return "\n".join(formatted_lines)
 
-    def _flatten_with_index(
-        self, node: Dict[str, Any], counter: List[int]
-    ) -> List[Dict[str, Any]]:
+    def _flatten_with_index(self, node: Dict[str, Any], counter: List[int]) -> List[Dict[str, Any]]:
         """Recursively flatten tree with index assignment."""
         results = []
 
@@ -170,9 +252,7 @@ class IndexedFormatter(TreeFormatter):
         bounds_str = f"{bounds.get('left', 0)},{bounds.get('top', 0)},{bounds.get('right', 0)},{bounds.get('bottom', 0)}"
 
         if self.use_normalized and self.screen_width and self.screen_height:
-            bounds_str = bounds_to_normalized(
-                bounds_str, self.screen_width, self.screen_height
-            )
+            bounds_str = bounds_to_normalized(bounds_str, self.screen_width, self.screen_height)
 
         text = (
             node.get("text")
@@ -186,9 +266,7 @@ class IndexedFormatter(TreeFormatter):
 
         checked_state = ""
         if node.get("isCheckable"):
-            checked_state = (
-                "isChecked=True" if node.get("isChecked") else "isChecked=False"
-            )
+            checked_state = "isChecked=True" if node.get("isChecked") else "isChecked=False"
 
         return {
             "index": index,
