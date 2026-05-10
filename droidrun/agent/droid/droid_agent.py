@@ -175,6 +175,13 @@ class DroidAgent(Workflow):
             credentials=config.credentials if config else CredentialsConfig(),
             external_agents=config.external_agents if config else {},
             mcp=config.mcp if config else MCPConfig(),
+            ui_parser_mode=config.ui_parser_mode if config else "omniparser",
+            omniparser_backend=config.omniparser_backend if config else "replicate",
+            omniparser_api_key=config.omniparser_api_key if config else "",
+            omniparser_local_url=config.omniparser_local_url if config else "http://localhost:8000",
+            omniparser_box_threshold=config.omniparser_box_threshold if config else 0.05,
+            omniparser_a11y_threshold=config.omniparser_a11y_threshold if config else 5,
+            target_package=config.target_package if config else None,
         )
 
         # These are populated in start_handler (unless injected via __init__)
@@ -439,6 +446,7 @@ class DroidAgent(Workflow):
                 omniparser_local_url=self.config.omniparser_local_url,
                 omniparser_box_threshold=self.config.omniparser_box_threshold,
                 omniparser_a11y_threshold=self.config.omniparser_a11y_threshold,
+                target_package=self.config.target_package,
             )
 
         # ── 3. Build tool registry ────────────────────────────────────

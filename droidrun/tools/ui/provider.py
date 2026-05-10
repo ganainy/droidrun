@@ -156,6 +156,8 @@ class AndroidStateProvider(StateProvider):
         omniparser_local_url: str = "http://localhost:8000",
         omniparser_box_threshold: float = 0.05,
         omniparser_a11y_threshold: int = 5,
+        target_package: Optional[str] = None,
+        target_recovery_attempts: int = 3,
     ) -> None:
         super().__init__(driver)
         self.tree_filter = tree_filter
@@ -170,12 +172,16 @@ class AndroidStateProvider(StateProvider):
         self.omniparser_local_url = omniparser_local_url
         self.omniparser_box_threshold = omniparser_box_threshold
         self.omniparser_a11y_threshold = omniparser_a11y_threshold
+        self.target_package = target_package
+        self.target_recovery_attempts = target_recovery_attempts
 
         # OmniParser client (initialized lazily)
         self._omni_client = None
         self._omni_initialized = False
 
     async def get_state(self) -> UIState:
+        await self._ensure_target_package_active()
+
         # Get screenshot via driver (ADB, no Portal needed)
         screenshot_bytes = await self._capture_screenshot_with_retry()
 
@@ -250,6 +256,62 @@ class AndroidStateProvider(StateProvider):
             use_normalized=self.use_normalized,
             omni_tree=omni_tree,
             omni_source=omni_source,
+        )
+
+    async def _ensure_target_package_active(self) -> None:
+        """Verify target app before screenshots or OmniParser state parsing."""
+        if not self.target_package:
+            return
+
+        device_id = getattr(self.driver, "_serial", None)
+        if device_id is None:
+            device = getattr(self.driver, "device", None)
+            device_id = getattr(device, "serial", None)
+
+        if not device_id:
+            raise RuntimeError(
+                "Cannot verify target app before state capture: Android device serial is unavailable"
+            )
+
+        try:
+            from mobile_crawler.domain.adb_action_executor import ADBActionExecutor
+        except Exception as exc:
+            raise RuntimeError(
+                "Cannot verify target app before state capture: ADBActionExecutor is unavailable"
+            ) from exc
+
+        adb_executor = ADBActionExecutor(device_id=device_id)
+        current_package = adb_executor.get_current_package()
+        if current_package == self.target_package:
+            return
+
+        logger.warning(
+            "Target app mismatch before state capture (current=%s, target=%s). "
+            "Relaunching target app before screenshot/OmniParser.",
+            current_package,
+            self.target_package,
+        )
+
+        last_error = None
+        for attempt in range(1, self.target_recovery_attempts + 1):
+            launch_result = adb_executor.am_start_recovery(self.target_package)
+            if not launch_result.success:
+                last_error = launch_result.error_message or "ADB launch command failed"
+
+            await asyncio.sleep(0.5)
+            current_package = adb_executor.get_current_package()
+            if current_package == self.target_package:
+                logger.info(
+                    "Recovered target app before state capture on attempt %s/%s",
+                    attempt,
+                    self.target_recovery_attempts,
+                )
+                return
+
+        detail = f"last_error={last_error}" if last_error else f"current_package={current_package}"
+        raise RuntimeError(
+            f"Unable to recover target app '{self.target_package}' before state capture "
+            f"after {self.target_recovery_attempts} attempts ({detail})"
         )
 
     async def _capture_screenshot_with_retry(self) -> bytes:

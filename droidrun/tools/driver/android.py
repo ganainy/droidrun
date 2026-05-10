@@ -220,34 +220,21 @@ class AndroidDriver(DeviceDriver):
         """Take screenshot using ADB screencap - no Portal needed."""
         await self.ensure_connected()
 
-        retries = 3
-        delay_seconds = 1.0
+        max_screenshot_attempts = 3
         last_error: Exception | None = None
 
-        for attempt in range(1, retries + 1):
+        for attempt in range(1, max_screenshot_attempts + 1):
             try:
                 # Use async_adbutils built-in screenshot_bytes method
                 result = await self.device.screenshot_bytes()
-            except Exception as e:
-                last_error = e
-                logger.warning(
-                    "Screenshot capture failed on attempt %s/%s: %s",
-                    attempt,
-                    retries,
-                    e,
-                )
-                if attempt < retries:
-                    await asyncio.sleep(delay_seconds)
-                continue
 
-            # Ensure bytes
-            if isinstance(result, str):
-                result = result.encode("utf-8")
+                # Ensure bytes
+                if isinstance(result, str):
+                    result = result.encode("utf-8")
 
-            # Check if result starts with PNG magic bytes and convert to JPEG if needed
-            if result[:8] == b"\x89PNG\r\n\x1a\n":
-                # It's PNG, validate and convert to JPEG using Pillow
-                try:
+                # Check if result starts with PNG magic bytes and convert to JPEG if needed
+                if result[:8] == b"\x89PNG\r\n\x1a\n":
+                    # It's PNG, validate and convert to JPEG using Pillow
                     import io
                     from PIL import Image
 
@@ -260,27 +247,32 @@ class AndroidDriver(DeviceDriver):
                         output = io.BytesIO()
                         img.save(output, format="JPEG", quality=95)
                         return output.getvalue()
-                except Exception as e:
-                    last_error = e
-                    logger.warning(
-                        "Invalid PNG screenshot on attempt %s/%s: %s",
+
+                # Not PNG - pass through as-is (likely JPEG already)
+                return result
+            except Exception as e:
+                last_error = e
+                logger.debug(
+                    "Invalid PNG screenshot on attempt %s/%s: %s",
+                    attempt,
+                    max_screenshot_attempts,
+                    e,
+                )
+                if attempt < max_screenshot_attempts:
+                    await asyncio.sleep(0.2 * attempt)
+                else:
+                    logger.error(
+                        "Screenshot capture failed on attempt %s/%s: %s",
                         attempt,
-                        retries,
+                        max_screenshot_attempts,
                         e,
                     )
-            else:
-                return result
-
-            if attempt < retries:
-                await asyncio.sleep(delay_seconds)
+                    raise
 
         if last_error is not None:
             raise RuntimeError("Screenshot capture failed after retries") from last_error
 
         raise RuntimeError("Screenshot capture failed after retries")
-
-        return result
-        return result
 
     async def get_ui_tree(self) -> Dict[str, Any]:
         """Get UI state - returns structure expected by provider.

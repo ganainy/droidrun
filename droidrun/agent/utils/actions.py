@@ -7,6 +7,7 @@ interacts with the device via ``ctx.driver``, resolves UI elements via
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
@@ -170,6 +171,13 @@ async def swipe(
 
 async def open_app(text: str, *, ctx: "ActionContext") -> ActionResult:
     """Open an app by its name."""
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+", text.strip()):
+        result = await ctx.driver.start_app(text.strip())
+        await asyncio.sleep(1)
+        if isinstance(result, str) and result.lower().startswith("failed"):
+            return ActionResult(success=False, summary=result)
+        return ActionResult(success=True, summary=str(result))
+
     if ctx.app_opener_llm is None:
         return ActionResult(
             success=False,

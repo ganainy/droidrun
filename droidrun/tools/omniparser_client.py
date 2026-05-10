@@ -173,30 +173,42 @@ class OmniParserClient:
                         return []
 
                     if isinstance(elements_raw, str) and elements_raw:
-                        # Parse string format: "icon 0: {...} icon 1: {...}"
+                        import ast
                         import re
 
-                        # Find all icon definitions: icon N: {...}
-                        icon_pattern = r"icon \d+: (\{[^}]+\})"
-                        matches = []
-                        try:
-                            matches = re.findall(icon_pattern, elements_raw)
-                        except Exception as e:
-                            logger.error(f"Regex failed: {e}")
-                            return []
+                        # Split on record boundaries: "icon N: {" starts each record.
+                        # Using a lookahead so the delimiter is not consumed.
+                        record_pattern = re.compile(r"(?=icon \d+: \{)")
+                        records = record_pattern.split(elements_raw)
 
-                        if not matches:
+                        if not any(record.strip() for record in records):
                             logger.warning(f"No icon matches found in: {elements_raw[:300]}")
                             return []
 
-                        for match in matches:
+                        for record in records:
+                            record = record.strip()
+                            if not record:
+                                continue
+                            # Extract the dict portion after "icon N: "
+                            brace_start = record.find("{")
+                            if brace_start == -1:
+                                continue
+                            dict_str = record[brace_start:]
+                            # Ensure the string is complete (ends with '}')
+                            # Drop truncated last records from Replicate response
+                            if not dict_str.rstrip().endswith("}"):
+                                logger.debug(
+                                    "Dropping truncated OmniParser element: %s",
+                                    dict_str[:80],
+                                )
+                                continue
                             try:
-                                el = eval(match)  # Safely parse the dict string
+                                el = ast.literal_eval(dict_str)
                                 if isinstance(el, dict) and "bbox" in el:
                                     valid_elements.append(el)
-                            except Exception as parse_err:
-                                logger.warning(f"Failed to parse element: {parse_err}")
-                                pass
+                            except (ValueError, SyntaxError) as e:
+                                logger.debug("Failed to parse element: %s", e)
+                                continue
 
                     logger.debug(f"Valid elements parsed: {len(valid_elements)}")
                     if valid_elements:

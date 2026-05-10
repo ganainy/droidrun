@@ -195,6 +195,7 @@ class DroidConfig:
     omniparser_local_url: str = "http://localhost:8000"
     omniparser_box_threshold: float = 0.05
     omniparser_a11y_threshold: int = 5
+    target_package: Optional[str] = None
 
     def __post_init__(self):
         """Ensure default profiles exist."""
@@ -324,6 +325,7 @@ class DroidConfig:
             omniparser_local_url=data.get("omniparser_local_url", "http://localhost:8000"),
             omniparser_box_threshold=data.get("omniparser_box_threshold", 0.05),
             omniparser_a11y_threshold=data.get("omniparser_a11y_threshold", 5),
+            target_package=data.get("target_package"),
         )
 
     @classmethod
